@@ -1,0 +1,30 @@
+[Unit]
+Description=Enterprise Linux Access Self-Service Portal
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=linuxportal
+Group=linuxportal
+WorkingDirectory=/opt/linux-access-portal/backend
+Environment="PATH=/opt/linux-access-portal/venv/bin:/usr/local/bin:/usr/bin"
+ExecStart=/opt/linux-access-portal/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4 --log-level info
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=5
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/linux-access-portal/backend/data
+ReadWritePaths=/opt/linux-access-portal/backend/logs
+PrivateTmp=true
+
+# Resource Limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target
