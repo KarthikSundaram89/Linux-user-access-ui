@@ -25,13 +25,25 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./data/portal.db"
     DATABASE_ECHO: bool = False
 
-    # Azure AD / Microsoft Entra ID
+    # Azure AD / Microsoft Entra ID (for SSO only - no Graph API)
     AZURE_TENANT_ID: str = ""
     AZURE_CLIENT_ID: str = ""
     AZURE_CLIENT_SECRET: str = ""
     AZURE_REDIRECT_URI: str = "http://localhost:8000/api/auth/callback"
     AZURE_AUTHORITY: str = ""
-    AZURE_SCOPES: str = "User.Read,User.ReadBasic.All"
+    AZURE_SCOPES: str = "User.Read"
+
+    # AD Export File (daily export from Active Directory to shared folder)
+    AD_EXPORT_PATH: str = "/shared/ad_exports"
+    AD_EXPORT_ENCODING: str = "utf-8"
+
+    # EC2 Inventory File (daily EC2 export with account, region, tags)
+    EC2_INVENTORY_PATH: str = "/shared/ec2_inventory"
+    EC2_INVENTORY_ENCODING: str = "utf-8"
+
+    # AWS Configuration (for live EC2 status checks)
+    AWS_DEFAULT_REGION: str = "us-east-1"
+    AWS_PROFILE_MAPPING: str = ""  # JSON: {"account_name": "aws_profile_name"}
 
     # SMTP Email
     SMTP_HOST: str = ""
@@ -79,6 +91,17 @@ class Settings(BaseSettings):
     @property
     def cors_origins_list(self) -> list[str]:
         return [origin.strip() for origin in self.CORS_ORIGINS.split(",")]
+
+    @property
+    def aws_profile_map(self) -> dict:
+        """Parse AWS_PROFILE_MAPPING JSON string into a dict."""
+        import json
+        if not self.AWS_PROFILE_MAPPING:
+            return {}
+        try:
+            return json.loads(self.AWS_PROFILE_MAPPING)
+        except (json.JSONDecodeError, TypeError):
+            return {}
 
     class Config:
         env_file = ".env"

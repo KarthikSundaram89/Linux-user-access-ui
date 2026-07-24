@@ -76,4 +76,11 @@ export const searchAPI = {
   search: (q, field) => api.get('/search', { params: { q, field } }),
 };
 
+// Servers (EC2 Inventory Lookup)
+export const serversAPI = {
+  lookup: (servers) => api.post('/servers/lookup', { servers }),
+  lookupSingle: (identifier) => api.get(`/servers/lookup/${identifier}`),
+  inventoryStats: () => api.get('/servers/inventory/stats'),
+};
+
 export default api;

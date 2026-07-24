@@ -124,17 +124,79 @@ class EmailService:
         await self.send_email([request_data['requester_email']], subject, body)
 
     async def notify_provisioning_complete(self, request_data: Dict[str, Any]):
-        """Notify user of provisioning result."""
-        status = "Successful" if request_data.get('success') else "Failed"
-        subject = f"Provisioning {status}: {request_data['request_id']}"
+        """Notify user of provisioning result with clear per-server breakdown."""
+        all_success = request_data.get('success', False)
+        succeeded = request_data.get('succeeded', 0)
+        failed = request_data.get('failed', 0)
+        total = request_data.get('total', 0)
+        server_results = request_data.get('server_results', [])
+
+        if all_success:
+            status_text = "Successful"
+            header_color = "#22c55e"
+        elif succeeded > 0:
+            status_text = "Partially Successful"
+            header_color = "#f59e0b"
+        else:
+            status_text = "Failed"
+            header_color = "#ef4444"
+
+        subject = f"Provisioning {status_text}: {request_data['request_id']} ({succeeded}/{total} servers)"
+
+        # Build per-server results table
+        server_rows = ""
+        for sr in server_results:
+            server_name = sr.get('server', sr.get('hostname') or sr.get('ip_address', 'Unknown'))
+            if sr.get('success'):
+                status_badge = '<span style="color:#22c55e;font-weight:bold;">&#10003; SUCCESS</span>'
+                detail = sr.get('message', 'Provisioned successfully')
+            else:
+                status_badge = '<span style="color:#ef4444;font-weight:bold;">&#10007; FAILED</span>'
+                error_type = sr.get('error_type', 'unknown')
+                detail = sr.get('message', sr.get('error_detail', 'Unknown error'))
+                if error_type == 'auth_failed':
+                    detail = f"Authentication failed - {detail}"
+                elif error_type == 'timeout':
+                    detail = f"Connection timed out - {detail}"
+                elif error_type == 'connection_failed':
+                    detail = f"Connection failed - {detail}"
+                elif error_type == 'script_failed':
+                    detail = f"Script error (exit {sr.get('exit_code', '?')}) - {detail}"
+
+            server_rows += f"""
+            <tr>
+                <td style="padding:8px;border-bottom:1px solid #e5e7eb;font-family:monospace;">{server_name}</td>
+                <td style="padding:8px;border-bottom:1px solid #e5e7eb;">{status_badge}</td>
+                <td style="padding:8px;border-bottom:1px solid #e5e7eb;font-size:12px;color:#6b7280;">{detail}</td>
+            </tr>"""
+
         body = f"""
-        <h2>Provisioning {status}</h2>
-        <p>Provisioning for your request is complete.</p>
-        <table>
-            <tr><td><b>Request ID:</b></td><td>{request_data['request_id']}</td></tr>
-            <tr><td><b>Succeeded:</b></td><td>{request_data.get('succeeded', 0)}</td></tr>
-            <tr><td><b>Failed:</b></td><td>{request_data.get('failed', 0)}</td></tr>
-        </table>
+        <div style="font-family:Arial,sans-serif;max-width:700px;">
+            <h2 style="color:{header_color};">Provisioning {status_text}</h2>
+            <table style="width:100%;margin-bottom:16px;">
+                <tr><td><b>Request ID:</b></td><td>{request_data['request_id']}</td></tr>
+                <tr><td><b>Total Servers:</b></td><td>{total}</td></tr>
+                <tr><td><b>Succeeded:</b></td><td style="color:#22c55e;font-weight:bold;">{succeeded}</td></tr>
+                <tr><td><b>Failed:</b></td><td style="color:#ef4444;font-weight:bold;">{failed}</td></tr>
+            </table>
+
+            <h3>Per-Server Results</h3>
+            <table style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;">
+                <thead>
+                    <tr style="background-color:#f9fafb;">
+                        <th style="padding:8px;text-align:left;border-bottom:2px solid #e5e7eb;">Server</th>
+                        <th style="padding:8px;text-align:left;border-bottom:2px solid #e5e7eb;">Status</th>
+                        <th style="padding:8px;text-align:left;border-bottom:2px solid #e5e7eb;">Details</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {server_rows}
+                </tbody>
+            </table>
+
+            {f'<p style="margin-top:16px;color:#ef4444;"><b>Action Required:</b> Some servers failed provisioning. Please review the errors above and retry or contact your administrator.</p>' if failed > 0 else ''}
+            {f'<p style="margin-top:16px;color:#22c55e;">All servers have been provisioned successfully.</p>' if all_success else ''}
+        </div>
         """
         await self.send_email([request_data['requester_email']], subject, body)
 

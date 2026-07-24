@@ -45,7 +45,10 @@ async def callback(
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
-    """Handle Azure AD callback after authentication."""
+    """
+    Handle Azure AD callback after authentication.
+    Uses AD export file for employee details instead of Microsoft Graph API.
+    """
     try:
         auth_flow = request.session.get("auth_flow", {})
         token_result = await azure_ad_service.acquire_token_by_code(
@@ -56,36 +59,71 @@ async def callback(
         if not token_result or "access_token" not in token_result:
             raise HTTPException(status_code=401, detail="Authentication failed")
 
-        # Fetch user profile from Microsoft Graph
-        profile = await azure_ad_service.get_user_profile(token_result["access_token"])
-        if not profile:
-            raise HTTPException(status_code=401, detail="Could not fetch user profile")
+        # Extract email from the ID token claims (no Graph API call)
+        id_token_claims = token_result.get("id_token_claims", {})
+        user_email = (
+            id_token_claims.get("preferred_username")
+            or id_token_claims.get("email")
+            or id_token_claims.get("upn")
+            or ""
+        ).lower()
 
-        # Find or create user
+        if not user_email:
+            raise HTTPException(status_code=401, detail="Could not determine user email from token")
+
+        azure_ad_id = id_token_claims.get("oid") or id_token_claims.get("sub", "")
+
+        # Look up employee details from the daily AD export file
+        from ...services.auth.ad_export_reader import ad_export_reader
+        ad_profile = ad_export_reader.get_user_by_email(user_email)
+
+        # Build profile from AD export (fallback to token claims if not found)
+        display_name = ""
+        department = ""
+        job_title = ""
+        employee_id = ""
+        manager_email = ""
+        manager_name = ""
+
+        if ad_profile:
+            display_name = ad_profile.get("display_name", "")
+            department = ad_profile.get("department", "")
+            job_title = ad_profile.get("job_title", "")
+            employee_id = ad_profile.get("employee_id", "")
+            manager_email = ad_profile.get("manager_email", "")
+            manager_name = ad_profile.get("manager_name", "")
+            logger.info(f"User profile loaded from AD export: {user_email}")
+        else:
+            # Fallback to token claims if AD export doesn't have the user
+            display_name = id_token_claims.get("name", user_email.split("@")[0])
+            logger.warning(f"User not found in AD export, using token claims: {user_email}")
+
+        # Find or create user in local DB
         result = await db.execute(
-            select(User).where(User.email == profile["email"])
+            select(User).where(User.email == user_email)
         )
         user = result.scalar_one_or_none()
 
         if user:
-            # Update user info
-            user.display_name = profile["display_name"]
-            user.department = profile.get("department")
-            user.job_title = profile.get("job_title")
-            user.manager_email = profile.get("manager_email")
-            user.manager_name = profile.get("manager_name")
+            # Update user info from AD export
+            user.display_name = display_name or user.display_name
+            user.department = department or user.department
+            user.job_title = job_title or user.job_title
+            user.employee_id = employee_id or user.employee_id
+            user.manager_email = manager_email or user.manager_email
+            user.manager_name = manager_name or user.manager_name
             user.last_login = datetime.now(timezone.utc)
         else:
             # Create new user
             user = User(
-                azure_ad_id=profile["azure_ad_id"],
-                email=profile["email"],
-                display_name=profile["display_name"],
-                department=profile.get("department"),
-                job_title=profile.get("job_title"),
-                employee_id=profile.get("employee_id"),
-                manager_email=profile.get("manager_email"),
-                manager_name=profile.get("manager_name"),
+                azure_ad_id=azure_ad_id,
+                email=user_email,
+                display_name=display_name or user_email.split("@")[0],
+                department=department,
+                job_title=job_title,
+                employee_id=employee_id,
+                manager_email=manager_email,
+                manager_name=manager_name,
                 role=UserRole.REQUESTER,
                 last_login=datetime.now(timezone.utc),
             )
@@ -102,7 +140,7 @@ async def callback(
             user_name=user.display_name,
             action="login",
             resource_type="session",
-            description="User logged in via Azure AD",
+            description="User logged in via Azure AD (profile from AD export)",
             ip_address=request.client.host if request.client else None,
         )
         db.add(audit)

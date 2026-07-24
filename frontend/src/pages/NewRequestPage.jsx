@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { requestsAPI } from '../services/api';
+import { requestsAPI, serversAPI } from '../services/api';
 import toast from 'react-hot-toast';
 
 const accessTypes = [
@@ -32,8 +32,10 @@ export default function NewRequestPage() {
     serverInput: '',
   });
   const [servers, setServers] = useState([]);
+  const [serverDetails, setServerDetails] = useState({});  // EC2 inventory details keyed by identifier
+  const [lookupLoading, setLookupLoading] = useState(false);
 
-  const addServers = () => {
+  const addServers = async () => {
     const lines = form.serverInput.split('\n').map(l => l.trim()).filter(Boolean);
     const newServers = [];
     const duplicates = [];
@@ -44,7 +46,7 @@ export default function NewRequestPage() {
       if (existing) {
         duplicates.push(line);
       } else {
-        newServers.push(isIP ? { ip_address: line } : { hostname: line });
+        newServers.push(isIP ? { ip_address: line, identifier: line } : { hostname: line, identifier: line });
       }
     });
 
@@ -52,6 +54,27 @@ export default function NewRequestPage() {
     if (newServers.length) {
       setServers([...servers, ...newServers]);
       setForm({ ...form, serverInput: '' });
+
+      // Automatically look up servers in EC2 inventory
+      setLookupLoading(true);
+      try {
+        const identifiers = newServers.map(s => s.identifier);
+        const res = await serversAPI.lookup(identifiers);
+        const details = { ...serverDetails };
+        for (const result of res.data.results) {
+          details[result.identifier] = result;
+        }
+        setServerDetails(details);
+        const found = res.data.found || 0;
+        const notFound = res.data.not_found || 0;
+        if (found > 0) toast.success(`${found} server(s) found in EC2 inventory`);
+        if (notFound > 0) toast(`${notFound} server(s) not found in inventory`, { icon: '⚠️' });
+      } catch (err) {
+        console.error('Server lookup failed', err);
+        toast.error('Could not look up servers in EC2 inventory');
+      } finally {
+        setLookupLoading(false);
+      }
     }
   };
 
@@ -149,13 +172,53 @@ export default function NewRequestPage() {
           {servers.length > 0 && (
             <div className="mt-3">
               <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Servers ({servers.length}):</p>
-              <div className="flex flex-wrap gap-2">
-                {servers.map((s, i) => (
-                  <span key={i} className="inline-flex items-center gap-1 rounded-full bg-gray-100 dark:bg-gray-700 px-3 py-1 text-sm">
-                    {s.hostname || s.ip_address}
-                    <button type="button" onClick={() => removeServer(i)} className="text-gray-400 hover:text-red-500">&times;</button>
-                  </span>
-                ))}
+              {lookupLoading && <p className="text-xs text-primary-600 mb-2 animate-pulse">Looking up servers in EC2 inventory...</p>}
+
+              {/* Server details table */}
+              <div className="overflow-x-auto border border-gray-200 dark:border-gray-600 rounded-lg">
+                <table className="min-w-full divide-y divide-gray-200 dark:divide-gray-700 text-sm">
+                  <thead className="bg-gray-50 dark:bg-gray-700">
+                    <tr>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400">Server</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400">Account</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400">Region</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400">Name</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400">Application</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400">OS</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400">Status</th>
+                      <th className="px-3 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400"></th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
+                    {servers.map((s, i) => {
+                      const identifier = s.hostname || s.ip_address;
+                      const detail = serverDetails[identifier || s.identifier];
+                      const found = detail && detail.found;
+                      return (
+                        <tr key={i} className={!found ? 'bg-yellow-50 dark:bg-yellow-900/10' : ''}>
+                          <td className="px-3 py-2 font-mono text-gray-900 dark:text-white">{identifier}</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{found ? detail.account_name : <span className="text-yellow-600 text-xs">Not in inventory</span>}</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{found ? detail.region : '-'}</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{found ? detail.name_tag : '-'}</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{found ? detail.application_tag : '-'}</td>
+                          <td className="px-3 py-2 text-gray-600 dark:text-gray-300">{found ? detail.os_tag : '-'}</td>
+                          <td className="px-3 py-2">
+                            {found && detail.live_status ? (
+                              <span className={`badge ${detail.live_status === 'running' ? 'badge-success' : detail.live_status === 'stopped' ? 'badge-danger' : 'badge-warning'}`}>
+                                {detail.live_status}
+                              </span>
+                            ) : found ? (
+                              <span className="badge badge-gray">unknown</span>
+                            ) : null}
+                          </td>
+                          <td className="px-3 py-2">
+                            <button type="button" onClick={() => removeServer(i)} className="text-red-400 hover:text-red-600 text-lg">&times;</button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             </div>
           )}

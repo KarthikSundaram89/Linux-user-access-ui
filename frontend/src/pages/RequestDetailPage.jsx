@@ -102,20 +102,35 @@ export default function RequestDetailPage() {
               <tr>
                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Server</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Details</th>
                 <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Provisioned At</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
               {request.servers?.map((server) => (
-                <tr key={server.id}>
+                <tr key={server.id} className={server.provisioning_status === 'failed' ? 'bg-red-50 dark:bg-red-900/10' : ''}>
                   <td className="px-4 py-2 text-sm text-gray-900 dark:text-white font-mono">{server.hostname || server.ip_address}</td>
-                  <td className="px-4 py-2"><StatusBadge status={server.provisioning_status} /></td>
+                  <td className="px-4 py-2">
+                    <StatusBadge status={server.provisioning_status} />
+                  </td>
+                  <td className="px-4 py-2 text-sm text-gray-600 dark:text-gray-400 max-w-sm">
+                    {server.provisioning_message ? (
+                      <span className={server.provisioning_status === 'failed' ? 'text-red-600 dark:text-red-400' : 'text-green-600 dark:text-green-400'}>
+                        {server.provisioning_message}
+                      </span>
+                    ) : '-'}
+                  </td>
                   <td className="px-4 py-2 text-sm text-gray-500">{server.provisioned_at ? new Date(server.provisioned_at).toLocaleString() : '-'}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        {request.servers?.some(s => s.provisioning_status === 'failed') && (
+          <div className="mt-4 p-3 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-md">
+            <p className="text-sm text-red-700 dark:text-red-300 font-medium">Some servers failed provisioning. Check the error details above or contact your administrator.</p>
+          </div>
+        )}
       </div>
 
       {/* Approval Timeline */}
