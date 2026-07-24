@@ -1,18 +1,30 @@
 """Access Request Schemas."""
 
+import re
 from datetime import datetime
 from typing import Optional, List
 from pydantic import BaseModel, Field, field_validator
 
 
-class ServerInput(BaseModel):
-    """Schema for server input (hostname or IP)."""
-    hostname: Optional[str] = None
-    ip_address: Optional[str] = None
+# IP address regex pattern
+IP_ADDRESS_PATTERN = re.compile(
+    r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
+)
 
-    @field_validator("hostname", "ip_address")
+
+class ServerInput(BaseModel):
+    """Schema for server input (IP address only)."""
+    ip_address: str
+
+    @field_validator("ip_address")
     @classmethod
-    def at_least_one(cls, v, info):
+    def validate_ip_address(cls, v):
+        """Validate that the value is a valid IPv4 address."""
+        v = v.strip()
+        if not v:
+            raise ValueError("IP address cannot be empty")
+        if not IP_ADDRESS_PATTERN.match(v):
+            raise ValueError(f"'{v}' is not a valid IP address. Only IPv4 addresses are accepted (e.g., 10.10.10.5)")
         return v
 
 
@@ -34,10 +46,9 @@ class AccessRequestCreate(BaseModel):
         """Validate no duplicate servers."""
         seen = set()
         for server in v:
-            key = (server.hostname, server.ip_address)
-            if key in seen:
-                raise ValueError(f"Duplicate server: {server.hostname or server.ip_address}")
-            seen.add(key)
+            if server.ip_address in seen:
+                raise ValueError(f"Duplicate server IP: {server.ip_address}")
+            seen.add(server.ip_address)
         return v
 
     @field_validator("access_type")

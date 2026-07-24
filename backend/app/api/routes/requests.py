@@ -61,7 +61,6 @@ async def create_request(
     for server_input in request_data.servers:
         server = RequestServer(
             request_id=access_request.id,
-            hostname=server_input.hostname,
             ip_address=server_input.ip_address,
         )
         db.add(server)
@@ -91,9 +90,7 @@ async def create_request(
             "request_id": access_request.request_id,
             "requester_email": current_user.email,
             "access_type": request_data.access_type,
-            "servers": ", ".join(
-                s.hostname or s.ip_address for s in request_data.servers
-            ),
+            "servers": ", ".join(s.ip_address for s in request_data.servers),
         },
     )
 

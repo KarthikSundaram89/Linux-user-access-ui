@@ -35,22 +35,36 @@ export default function NewRequestPage() {
   const [serverDetails, setServerDetails] = useState({});  // EC2 inventory details keyed by identifier
   const [lookupLoading, setLookupLoading] = useState(false);
 
+  const IP_REGEX = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/;
+
   const addServers = async () => {
     const lines = form.serverInput.split('\n').map(l => l.trim()).filter(Boolean);
     const newServers = [];
     const duplicates = [];
+    const invalid = [];
 
     lines.forEach(line => {
-      const isIP = /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(line);
-      const existing = servers.find(s => (isIP ? s.ip_address : s.hostname) === line);
+      if (!IP_REGEX.test(line)) {
+        invalid.push(line);
+        return;
+      }
+      // Validate each octet is 0-255
+      const octets = line.split('.');
+      const validOctets = octets.every(o => parseInt(o, 10) >= 0 && parseInt(o, 10) <= 255);
+      if (!validOctets) {
+        invalid.push(line);
+        return;
+      }
+      const existing = servers.find(s => s.ip_address === line);
       if (existing) {
         duplicates.push(line);
       } else {
-        newServers.push(isIP ? { ip_address: line, identifier: line } : { hostname: line, identifier: line });
+        newServers.push({ ip_address: line });
       }
     });
 
-    if (duplicates.length) toast.error(`Duplicate servers: ${duplicates.join(', ')}`);
+    if (invalid.length) toast.error(`Invalid IP address(es): ${invalid.join(', ')}. Only IPv4 addresses are allowed.`);
+    if (duplicates.length) toast.error(`Duplicate IP(s): ${duplicates.join(', ')}`);
     if (newServers.length) {
       setServers([...servers, ...newServers]);
       setForm({ ...form, serverInput: '' });
@@ -58,7 +72,7 @@ export default function NewRequestPage() {
       // Automatically look up servers in EC2 inventory
       setLookupLoading(true);
       try {
-        const identifiers = newServers.map(s => s.identifier);
+        const identifiers = newServers.map(s => s.ip_address);
         const res = await serversAPI.lookup(identifiers);
         const details = { ...serverDetails };
         for (const result of res.data.results) {
@@ -68,7 +82,7 @@ export default function NewRequestPage() {
         const found = res.data.found || 0;
         const notFound = res.data.not_found || 0;
         if (found > 0) toast.success(`${found} server(s) found in EC2 inventory`);
-        if (notFound > 0) toast(`${notFound} server(s) not found in inventory`, { icon: '⚠️' });
+        if (notFound > 0) toast(`${notFound} IP(s) not found in EC2 inventory`, { icon: '⚠️' });
       } catch (err) {
         console.error('Server lookup failed', err);
         toast.error('Could not look up servers in EC2 inventory');
@@ -97,7 +111,7 @@ export default function NewRequestPage() {
         business_justification: form.business_justification,
         application_name: form.application_name || null,
         project_name: form.project_name || null,
-        servers,
+        servers: servers.map(s => ({ ip_address: s.ip_address })),
         is_renewal: form.access_type === 'renew_sudo',
       };
       const res = await requestsAPI.create(payload);
@@ -164,8 +178,9 @@ export default function NewRequestPage() {
         <div className="card space-y-4">
           <h2 className="text-lg font-medium text-gray-900 dark:text-white">Server Details</h2>
           <div>
-            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Enter hostnames or IP addresses (one per line)</label>
-            <textarea value={form.serverInput} onChange={(e) => setForm({...form, serverInput: e.target.value})} className="input-field font-mono" rows="4" placeholder={"10.10.10.5\n10.10.10.8\napp01\ndb01"} />
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Enter server IP addresses (one per line)</label>
+            <textarea value={form.serverInput} onChange={(e) => setForm({...form, serverInput: e.target.value})} className="input-field font-mono" rows="4" placeholder={"10.10.10.5\n10.10.10.8\n172.16.0.100\n192.168.1.50"} />
+            <p className="mt-1 text-xs text-gray-500 dark:text-gray-400">Only IPv4 addresses are accepted. Enter one IP per line.</p>
           </div>
           <button type="button" onClick={addServers} className="btn-secondary">Add Servers</button>
 
@@ -191,8 +206,8 @@ export default function NewRequestPage() {
                   </thead>
                   <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
                     {servers.map((s, i) => {
-                      const identifier = s.hostname || s.ip_address;
-                      const detail = serverDetails[identifier || s.identifier];
+                      const identifier = s.ip_address;
+                      const detail = serverDetails[identifier];
                       const found = detail && detail.found;
                       return (
                         <tr key={i} className={!found ? 'bg-yellow-50 dark:bg-yellow-900/10' : ''}>
