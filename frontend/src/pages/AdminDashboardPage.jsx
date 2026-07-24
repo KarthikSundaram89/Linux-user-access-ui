@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { adminAPI, reportsAPI } from '../services/api';
+import { adminAPI } from '../services/api';
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 import {
   UsersIcon,
   ClockIcon,
@@ -10,21 +11,32 @@ import {
   ServerStackIcon,
 } from '@heroicons/react/24/outline';
 
+const COLORS = ['#3b82f6', '#22c55e', '#ef4444', '#f59e0b', '#8b5cf6', '#06b6d4'];
+
 export default function AdminDashboardPage() {
   const [stats, setStats] = useState(null);
-  const [trends, setTrends] = useState([]);
+  const [monthlyData, setMonthlyData] = useState([]);
+  const [topServers, setTopServers] = useState([]);
+  const [approvalSLA, setApprovalSLA] = useState([]);
+  const [rotationStatus, setRotationStatus] = useState(null);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => { loadData(); }, []);
 
   const loadData = async () => {
     try {
-      const [statsRes, trendsRes] = await Promise.all([
+      const [statsRes, monthlyRes, serversRes, slaRes, rotRes] = await Promise.all([
         adminAPI.dashboard(),
-        reportsAPI.monthlyTrends(),
+        adminAPI.chartMonthly().catch(() => ({ data: [] })),
+        adminAPI.chartTopServers().catch(() => ({ data: [] })),
+        adminAPI.chartApprovalSLA().catch(() => ({ data: [] })),
+        adminAPI.rotationStatus().catch(() => ({ data: null })),
       ]);
       setStats(statsRes.data);
-      setTrends(trendsRes.data.trends || []);
+      setMonthlyData(monthlyRes.data || []);
+      setTopServers(serversRes.data || []);
+      setApprovalSLA(slaRes.data || []);
+      setRotationStatus(rotRes.data);
     } catch (err) {
       console.error('Failed to load admin dashboard', err);
     } finally {
@@ -60,37 +72,79 @@ export default function AdminDashboardPage() {
         ))}
       </div>
 
-      {/* Monthly Trends */}
-      <div className="card">
-        <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Monthly Request Trends</h2>
-        {trends.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="min-w-full">
-              <thead>
-                <tr>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Month</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Requests</th>
-                  <th className="px-4 py-2 text-left text-xs font-medium text-gray-500 uppercase">Visual</th>
-                </tr>
-              </thead>
-              <tbody>
-                {trends.map((t) => (
-                  <tr key={t.month}>
-                    <td className="px-4 py-2 text-sm text-gray-900 dark:text-white">{t.month}</td>
-                    <td className="px-4 py-2 text-sm text-gray-700 dark:text-gray-300">{t.count}</td>
-                    <td className="px-4 py-2">
-                      <div className="h-4 rounded bg-primary-100 dark:bg-primary-900/30">
-                        <div className="h-4 rounded bg-primary-500" style={{ width: `${Math.min(100, (t.count / Math.max(...trends.map(tr => tr.count))) * 100)}%` }}></div>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+      {/* Rotation Warnings (#10) */}
+      {rotationStatus && rotationStatus.warnings?.length > 0 && (
+        <div className="card border-yellow-300 dark:border-yellow-600">
+          <h2 className="text-lg font-medium text-yellow-700 dark:text-yellow-400 mb-3">Credential Rotation Warnings</h2>
+          <div className="space-y-2">
+            {rotationStatus.warnings.map((w, i) => (
+              <div key={i} className="flex items-center gap-3 p-2 bg-yellow-50 dark:bg-yellow-900/20 rounded">
+                <ExclamationTriangleIcon className="h-5 w-5 text-yellow-500 shrink-0" />
+                <div>
+                  <p className="text-sm font-medium text-gray-900 dark:text-white">{w.name}</p>
+                  <p className="text-xs text-gray-600 dark:text-gray-400">{w.message}</p>
+                </div>
+                <span className={`ml-auto badge ${w.status === 'overdue' ? 'badge-danger' : 'badge-warning'}`}>{w.status}</span>
+              </div>
+            ))}
           </div>
-        ) : (
-          <p className="text-gray-500 dark:text-gray-400 text-sm">No data yet.</p>
-        )}
+        </div>
+      )}
+
+      {/* Charts */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Monthly Requests Chart */}
+        <div className="card">
+          <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Monthly Requests</h2>
+          {monthlyData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={250}>
+              <BarChart data={monthlyData}>
+                <XAxis dataKey="month" tick={{ fontSize: 12 }} />
+                <YAxis tick={{ fontSize: 12 }} />
+                <Tooltip />
+                <Bar dataKey="total" fill="#3b82f6" name="Total" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="approved" fill="#22c55e" name="Approved" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="rejected" fill="#ef4444" name="Rejected" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <p className="text-gray-500 text-sm">No data yet.</p>
+          )}
+        </div>
+
+        {/* Top Servers Chart */}
+        <div className="card">
+          <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Top Requested Servers</h2>
+          {topServers.length > 0 ? (
+            <ResponsiveContainer width="100%" height={250}>
+              <BarChart data={topServers.slice(0, 8)} layout="vertical">
+                <XAxis type="number" tick={{ fontSize: 12 }} />
+                <YAxis dataKey="ip_address" type="category" tick={{ fontSize: 11 }} width={120} />
+                <Tooltip />
+                <Bar dataKey="request_count" fill="#8b5cf6" name="Requests" radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <p className="text-gray-500 text-sm">No data yet.</p>
+          )}
+        </div>
+
+        {/* Approval SLA Chart */}
+        <div className="card">
+          <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Approval SLA (Avg Hours)</h2>
+          {approvalSLA.length > 0 ? (
+            <ResponsiveContainer width="100%" height={200}>
+              <BarChart data={approvalSLA}>
+                <XAxis dataKey="step_name" tick={{ fontSize: 11 }} />
+                <YAxis tick={{ fontSize: 12 }} />
+                <Tooltip />
+                <Bar dataKey="avg_hours" fill="#f59e0b" name="Avg Hours" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <p className="text-gray-500 text-sm">No data yet.</p>
+          )}
+        </div>
       </div>
 
       {/* Quick Links */}

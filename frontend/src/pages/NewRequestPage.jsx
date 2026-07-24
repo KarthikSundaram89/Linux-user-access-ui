@@ -184,6 +184,43 @@ export default function NewRequestPage() {
           </div>
           <button type="button" onClick={addServers} className="btn-secondary">Add Servers</button>
 
+          {/* CSV Upload */}
+          <div className="flex items-center gap-3 mt-2">
+            <label className="btn-secondary cursor-pointer text-sm">
+              Upload CSV
+              <input type="file" accept=".csv,.txt" className="hidden" onChange={async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                try {
+                  const res = await requestsAPI.uploadCSV(file);
+                  const { valid_ips, invalid, duplicates, total_valid } = res.data;
+                  if (total_valid > 0) {
+                    const newServers = valid_ips.filter(ip => !servers.find(s => s.ip_address === ip)).map(ip => ({ ip_address: ip }));
+                    setServers([...servers, ...newServers]);
+                    toast.success(`${newServers.length} IP(s) added from CSV`);
+                    // Auto-lookup
+                    if (newServers.length > 0) {
+                      setLookupLoading(true);
+                      try {
+                        const lookupRes = await serversAPI.lookup(newServers.map(s => s.ip_address));
+                        const details = { ...serverDetails };
+                        for (const result of lookupRes.data.results) { details[result.identifier] = result; }
+                        setServerDetails(details);
+                      } catch (err) { console.error(err); }
+                      setLookupLoading(false);
+                    }
+                  }
+                  if (invalid.length) toast.error(`${invalid.length} invalid entries skipped`);
+                  if (duplicates.length) toast(`${duplicates.length} duplicates skipped`, { icon: '⚠️' });
+                } catch (err) {
+                  toast.error('Failed to parse CSV file');
+                }
+                e.target.value = '';
+              }} />
+            </label>
+            <span className="text-xs text-gray-500 dark:text-gray-400">Upload a CSV with IP addresses (one per line or column named "ip")</span>
+          </div>
+
           {servers.length > 0 && (
             <div className="mt-3">
               <p className="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Servers ({servers.length}):</p>
@@ -242,6 +279,16 @@ export default function NewRequestPage() {
         {/* Submit */}
         <div className="flex justify-end gap-3">
           <button type="button" onClick={() => navigate('/requests')} className="btn-secondary">Cancel</button>
+          <button type="button" disabled={loading || servers.length === 0} onClick={async () => {
+            setLoading(true);
+            try {
+              const payload = { access_type: form.access_type, environment: form.environment, purpose: form.purpose || 'Draft - to be completed', business_justification: form.business_justification || 'Draft - to be completed', application_name: form.application_name || null, project_name: form.project_name || null, servers: servers.map(s => ({ ip_address: s.ip_address })), is_renewal: form.access_type === 'renew_sudo' };
+              const res = await requestsAPI.saveDraft(payload);
+              toast.success(`Draft saved: ${res.data.request_id}`);
+              navigate(`/requests/${res.data.request_id}`);
+            } catch (err) { toast.error('Failed to save draft'); }
+            setLoading(false);
+          }} className="btn-secondary">Save as Draft</button>
           <button type="submit" disabled={loading} className="btn-primary">{loading ? 'Submitting...' : 'Submit Request'}</button>
         </div>
       </form>

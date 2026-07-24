@@ -15,11 +15,24 @@ api.interceptors.request.use((config) => {
   return config;
 });
 
-// Handle 401 responses
+// Handle 401 responses - try refresh before redirect
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
-    if (error.response?.status === 401) {
+  async (error) => {
+    const originalRequest = error.config;
+    if (error.response?.status === 401 && !originalRequest._retry) {
+      originalRequest._retry = true;
+      try {
+        const refreshRes = await api.post('/auth/refresh');
+        const newToken = refreshRes.data.access_token;
+        if (newToken) {
+          localStorage.setItem('access_token', newToken);
+          originalRequest.headers.Authorization = `Bearer ${newToken}`;
+          return api(originalRequest);
+        }
+      } catch (refreshErr) {
+        // Refresh failed - redirect to login
+      }
       localStorage.removeItem('access_token');
       localStorage.removeItem('user');
       window.location.href = '/login';
@@ -33,6 +46,7 @@ export const authAPI = {
   login: () => api.get('/auth/login'),
   emergencyLogin: (data) => api.post('/auth/login/emergency', data),
   logout: () => api.post('/auth/logout'),
+  refresh: () => api.post('/auth/refresh'),
   me: () => api.get('/auth/me'),
 };
 
@@ -42,6 +56,15 @@ export const requestsAPI = {
   get: (id) => api.get(`/requests/${id}`),
   create: (data) => api.post('/requests', data),
   cancel: (id) => api.post(`/requests/${id}/cancel`),
+  retry: (id) => api.post(`/requests/${id}/retry`),
+  clone: (id) => api.post(`/requests/${id}/clone`),
+  saveDraft: (data) => api.post('/requests/draft', data),
+  submitDraft: (id) => api.post(`/requests/${id}/submit`),
+  uploadCSV: (file) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    return api.post('/requests/upload-csv', formData, { headers: { 'Content-Type': 'multipart/form-data' } });
+  },
 };
 
 // Approvals
@@ -49,6 +72,7 @@ export const approvalsAPI = {
   pending: () => api.get('/approvals/pending'),
   action: (stepId, data) => api.post(`/approvals/${stepId}/action`, data),
   history: (requestId) => api.get(`/approvals/history/${requestId}`),
+  comments: (requestId) => api.get(`/approvals/comments/${requestId}`),
 };
 
 // Admin
@@ -62,6 +86,14 @@ export const adminAPI = {
   scripts: () => api.get('/admin/scripts'),
   workflow: () => api.get('/admin/workflow'),
   auditLogs: (params) => api.get('/admin/audit-logs', { params }),
+  emailTemplates: () => api.get('/admin/email-templates'),
+  createEmailTemplate: (data) => api.post('/admin/email-templates', null, { params: data }),
+  updateEmailTemplate: (id, data) => api.put(`/admin/email-templates/${id}`, null, { params: data }),
+  deleteEmailTemplate: (id) => api.delete(`/admin/email-templates/${id}`),
+  rotationStatus: () => api.get('/admin/rotation-status'),
+  chartMonthly: () => api.get('/admin/charts/monthly-requests'),
+  chartTopServers: () => api.get('/admin/charts/top-servers'),
+  chartApprovalSLA: () => api.get('/admin/charts/approval-sla'),
 };
 
 // Reports

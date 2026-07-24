@@ -59,8 +59,23 @@ async def lifespan(app: FastAPI):
     logger.info("Application shutdown complete")
 
 
-# Rate limiter
-limiter = Limiter(key_func=get_remote_address)
+# Rate limiter (per-user when authenticated, per-IP for anonymous)
+def _get_rate_limit_key(request: Request) -> str:
+    """Rate limit by user email if authenticated, otherwise by IP."""
+    token = request.cookies.get("access_token")
+    if not token:
+        auth_header = request.headers.get("Authorization")
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header[7:]
+    if token:
+        from .core.security import decode_access_token
+        payload = decode_access_token(token)
+        if payload and "email" in payload:
+            return payload["email"]
+    return get_remote_address(request)
+
+
+limiter = Limiter(key_func=_get_rate_limit_key)
 
 # Create FastAPI app
 app = FastAPI(

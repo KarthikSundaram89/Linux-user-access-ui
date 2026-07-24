@@ -236,6 +236,37 @@ async def logout(
     return {"message": "Logged out successfully"}
 
 
+@router.post("/refresh")
+async def refresh_token(
+    request: Request,
+    response: Response,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Refresh the access token before it expires.
+    Returns a new token if the current one is still valid.
+    """
+    from ..dependencies.auth import get_current_user
+    try:
+        user = await get_current_user(request, db)
+    except Exception:
+        raise HTTPException(status_code=401, detail="Token expired, please login again")
+
+    # Issue a new token
+    new_token = create_access_token({"sub": str(user.id), "email": user.email})
+
+    response.set_cookie(
+        key="access_token",
+        value=new_token,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        max_age=settings.SESSION_TIMEOUT_MINUTES * 60,
+    )
+
+    return {"access_token": new_token, "expires_in": settings.SESSION_TIMEOUT_MINUTES * 60}
+
+
 @router.get("/me")
 async def get_current_user_info(
     request: Request,

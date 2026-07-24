@@ -109,13 +109,13 @@ class ProvisioningService:
                 "server_results": [],
             }
 
-        # Get requester username
+        # Get requester username (email prefix, lowercase)
         from ...models.user import User
         user_result = await self.db.execute(
             select(User).where(User.id == request.requester_id)
         )
         requester = user_result.scalar_one()
-        username = requester.email.split("@")[0]
+        username = requester.email.split("@")[0].lower()
 
         # Provision each server (continue on failure)
         server_results: List[ServerProvisioningResult] = []
@@ -186,6 +186,9 @@ class ProvisioningService:
         result.started_at = datetime.now(timezone.utc)
         result.status = "in_progress"
 
+        # Resolve to private IP from EC2 inventory for SSH connection
+        resolved_hostname = await self._resolve_server_ip(hostname)
+
         # Create provisioning task record
         task = ProvisioningTask(
             request_id=request.id,
@@ -207,14 +210,14 @@ class ProvisioningService:
 
             script = Template(script_template).safe_substitute(
                 username=username,
-                hostname=hostname,
+                hostname=resolved_hostname,
                 expiry_date=expiry_date,
                 request_id=request.request_id,
             )
 
-            # Execute via SSH
+            # Execute via SSH using resolved private IP
             ssh_result = await self.ssh_engine.execute_on_server(
-                hostname=hostname,
+                hostname=resolved_hostname,
                 script=script,
                 private_key_encrypted=ssh_key.private_key_encrypted,
                 passphrase_encrypted=ssh_key.passphrase_encrypted,
@@ -353,18 +356,22 @@ class ProvisioningService:
             select(User).where(User.id == request.requester_id)
         )
         requester = user_result.scalar_one()
-        username = requester.email.split("@")[0]
+        username = requester.email.split("@")[0].lower()
 
         revoked = 0
         for server in request.servers:
             hostname = server.hostname or server.ip_address
+
+            # Use EC2 inventory private IP if available
+            resolved_ip = await self._resolve_server_ip(hostname)
+
             script = Template(script_obj.script_content).safe_substitute(
                 username=username,
-                hostname=hostname,
+                hostname=resolved_ip,
                 request_id=request.request_id,
             )
             ssh_result = await self.ssh_engine.execute_on_server(
-                hostname=hostname,
+                hostname=resolved_ip,
                 script=script,
                 private_key_encrypted=ssh_key.private_key_encrypted,
                 passphrase_encrypted=ssh_key.passphrase_encrypted,
@@ -374,3 +381,81 @@ class ProvisioningService:
 
         request.status = RequestStatus.REVOKED
         return {"success": True, "revoked": revoked, "total": len(request.servers)}
+
+    async def retry_failed_servers(self, request: AccessRequest) -> Dict[str, Any]:
+        """
+        Retry provisioning only for servers that previously failed.
+        Returns detailed per-server results.
+        """
+        failed_servers = [s for s in request.servers if s.provisioning_status == "failed"]
+        if not failed_servers:
+            return {"success": True, "message": "No failed servers to retry", "total": 0, "succeeded": 0, "failed": 0, "server_results": []}
+
+        ssh_key = await self._get_ssh_key()
+        if not ssh_key:
+            return {"success": False, "error": "No SSH key configured", "server_results": []}
+
+        script_template = await self._get_script(request.access_type)
+        if not script_template:
+            return {"success": False, "error": "No provisioning script configured", "server_results": []}
+
+        from ...models.user import User
+        user_result = await self.db.execute(
+            select(User).where(User.id == request.requester_id)
+        )
+        requester = user_result.scalar_one()
+        username = requester.email.split("@")[0].lower()
+
+        server_results: List[ServerProvisioningResult] = []
+        for server in failed_servers:
+            hostname = server.hostname or server.ip_address
+            result = await self._provision_single_server(
+                request=request,
+                server=server,
+                hostname=hostname,
+                username=username,
+                script_template=script_template,
+                ssh_key=ssh_key,
+            )
+            server_results.append(result)
+
+        success_count = sum(1 for r in server_results if r.success)
+        total = len(server_results)
+
+        # Re-evaluate request status
+        all_servers_status = [s.provisioning_status for s in request.servers]
+        if all(s == "success" for s in all_servers_status):
+            request.status = RequestStatus.PROVISIONED
+            request.provisioned_at = datetime.now(timezone.utc)
+            if request.access_type in [AccessType.SUDO_ACCESS, AccessType.BOTH, AccessType.RENEW_SUDO]:
+                request.sudo_expiry_date = datetime.now(timezone.utc) + timedelta(days=settings.SUDO_VALIDITY_DAYS)
+        elif any(s == "success" for s in all_servers_status):
+            request.status = RequestStatus.PARTIALLY_PROVISIONED
+        else:
+            request.status = RequestStatus.PROVISIONING_FAILED
+
+        await self.db.flush()
+
+        return {
+            "success": success_count == total,
+            "total": total,
+            "succeeded": success_count,
+            "failed": total - success_count,
+            "request_id": request.request_id,
+            "requester_email": requester.email,
+            "server_results": [r.to_dict() for r in server_results],
+        }
+
+    async def _resolve_server_ip(self, identifier: str) -> str:
+        """
+        Resolve a server identifier to the best IP for SSH connection.
+        Uses EC2 inventory to find the private IP if available.
+        """
+        try:
+            from ..inventory.ec2_inventory import ec2_inventory_service
+            server_info = ec2_inventory_service.lookup_server(identifier)
+            if server_info and server_info.private_ip:
+                return server_info.private_ip
+        except Exception:
+            pass
+        return identifier

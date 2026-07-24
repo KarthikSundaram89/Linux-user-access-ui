@@ -22,18 +22,21 @@ export default function RequestDetailPage() {
   const navigate = useNavigate();
   const [request, setRequest] = useState(null);
   const [approvalHistory, setApprovalHistory] = useState(null);
+  const [approvalComments, setApprovalComments] = useState([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => { loadData(); }, [requestId]);
 
   const loadData = async () => {
     try {
-      const [reqRes, histRes] = await Promise.all([
+      const [reqRes, histRes, commRes] = await Promise.all([
         requestsAPI.get(requestId),
         approvalsAPI.history(requestId).catch(() => null),
+        approvalsAPI.comments(requestId).catch(() => null),
       ]);
       setRequest(reqRes.data);
       if (histRes) setApprovalHistory(histRes.data);
+      if (commRes) setApprovalComments(commRes.data.comments || []);
     } catch (err) {
       toast.error('Failed to load request details');
     } finally {
@@ -68,6 +71,31 @@ export default function RequestDetailPage() {
           {request.status === 'pending_approval' && (
             <button onClick={handleCancel} className="btn-danger text-sm">Cancel Request</button>
           )}
+          {(request.status === 'provisioning_failed' || request.status === 'partially_provisioned') && (
+            <button onClick={async () => {
+              try {
+                const res = await requestsAPI.retry(requestId);
+                toast.success(`Retried ${res.data.total} server(s): ${res.data.succeeded} succeeded`);
+                loadData();
+              } catch (err) { toast.error(err.response?.data?.detail || 'Retry failed'); }
+            }} className="btn-primary text-sm">Retry Failed Servers</button>
+          )}
+          {request.status === 'draft' && (
+            <button onClick={async () => {
+              try {
+                await requestsAPI.submitDraft(requestId);
+                toast.success('Draft submitted for approval');
+                loadData();
+              } catch (err) { toast.error(err.response?.data?.detail || 'Submit failed'); }
+            }} className="btn-primary text-sm">Submit Draft</button>
+          )}
+          <button onClick={async () => {
+            try {
+              const res = await requestsAPI.clone(requestId);
+              toast.success(`Cloned as draft: ${res.data.request_id}`);
+              navigate(`/requests/${res.data.request_id}`);
+            } catch (err) { toast.error('Clone failed'); }
+          }} className="btn-secondary text-sm">Request Again</button>
         </div>
       </div>
 
@@ -146,6 +174,28 @@ export default function RequestDetailPage() {
                   <p className="text-xs text-gray-500 dark:text-gray-400">{step.approver_email} - <StatusBadge status={step.status} /></p>
                   {step.completed_at && <p className="text-xs text-gray-400 mt-0.5">{new Date(step.completed_at).toLocaleString()}</p>}
                 </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Approval Comments (#7) */}
+      {approvalComments.length > 0 && (
+        <div className="card">
+          <h2 className="text-lg font-medium text-gray-900 dark:text-white mb-4">Approver Comments</h2>
+          <div className="space-y-3">
+            {approvalComments.map((comment, idx) => (
+              <div key={idx} className="border-l-4 border-primary-400 pl-4 py-2">
+                <div className="flex items-center gap-2 text-sm">
+                  <span className="font-medium text-gray-900 dark:text-white">{comment.approver_name}</span>
+                  <span className="text-gray-400">|</span>
+                  <span className="text-gray-500 text-xs">{comment.step_name}</span>
+                  <span className="text-gray-400">|</span>
+                  <StatusBadge status={comment.action} />
+                </div>
+                <p className="mt-1 text-sm text-gray-700 dark:text-gray-300">{comment.comments}</p>
+                <p className="mt-1 text-xs text-gray-400">{comment.created_at ? new Date(comment.created_at).toLocaleString() : ''}</p>
               </div>
             ))}
           </div>

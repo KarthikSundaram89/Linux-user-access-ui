@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, UploadFile, File
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -198,6 +198,287 @@ async def cancel_request(
     db.add(audit)
 
     return {"message": "Request cancelled", "request_id": request_id}
+
+
+@router.post("/{request_id}/retry")
+async def retry_failed_servers(
+    request_id: str,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Retry provisioning only for servers that previously failed."""
+    result = await db.execute(
+        select(AccessRequest)
+        .options(selectinload(AccessRequest.servers))
+        .where(AccessRequest.request_id == request_id)
+    )
+    access_request = result.scalar_one_or_none()
+
+    if not access_request:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    if access_request.status not in [RequestStatus.PROVISIONING_FAILED, RequestStatus.PARTIALLY_PROVISIONED]:
+        raise HTTPException(status_code=400, detail="Only requests with failed servers can be retried")
+
+    from ...services.provisioning.provisioner import ProvisioningService
+    from ...services.notification.email_service import email_service
+
+    provisioner = ProvisioningService(db)
+    prov_result = await provisioner.retry_failed_servers(access_request)
+
+    # Notify user of retry results
+    if prov_result.get("requester_email"):
+        background_tasks.add_task(
+            email_service.notify_provisioning_complete, prov_result
+        )
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        action="retry_provisioning",
+        resource_type="access_request",
+        resource_id=request_id,
+        description=f"Retried {prov_result.get('total', 0)} failed servers",
+    )
+    db.add(audit)
+
+    return prov_result
+
+
+@router.post("/{request_id}/clone")
+async def clone_request(
+    request_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Clone a previous request (Request Again).
+    Creates a new draft request with the same servers, type, and details.
+    """
+    result = await db.execute(
+        select(AccessRequest)
+        .options(selectinload(AccessRequest.servers))
+        .where(AccessRequest.request_id == request_id)
+    )
+    original = result.scalar_one_or_none()
+
+    if not original:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    from ...core.security import generate_request_id as gen_id
+
+    # Create a new draft request cloned from the original
+    new_request = AccessRequest(
+        request_id=gen_id(),
+        requester_id=current_user.id,
+        access_type=original.access_type,
+        environment=original.environment,
+        purpose=original.purpose,
+        business_justification=original.business_justification,
+        application_name=original.application_name,
+        project_name=original.project_name,
+        status=RequestStatus.DRAFT,
+        is_renewal=original.is_renewal,
+    )
+    db.add(new_request)
+    await db.flush()
+
+    # Clone servers
+    for server in original.servers:
+        new_server = RequestServer(
+            request_id=new_request.id,
+            hostname=server.hostname,
+            ip_address=server.ip_address,
+        )
+        db.add(new_server)
+
+    await db.flush()
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        action="request_cloned",
+        resource_type="access_request",
+        resource_id=new_request.request_id,
+        description=f"Cloned from {request_id}",
+    )
+    db.add(audit)
+
+    await db.refresh(new_request, ["servers"])
+    return _format_request_response(new_request, current_user)
+
+
+@router.post("/draft", response_model=AccessRequestResponse)
+async def save_draft(
+    request_data: AccessRequestCreate,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Save a request as draft for later submission."""
+    from ...core.security import generate_request_id as gen_id
+
+    access_request = AccessRequest(
+        request_id=gen_id(),
+        requester_id=current_user.id,
+        access_type=AccessType(request_data.access_type),
+        environment=EnvironmentType(request_data.environment),
+        purpose=request_data.purpose,
+        business_justification=request_data.business_justification,
+        application_name=request_data.application_name,
+        project_name=request_data.project_name,
+        is_renewal=request_data.is_renewal,
+        status=RequestStatus.DRAFT,
+    )
+    db.add(access_request)
+    await db.flush()
+
+    for server_input in request_data.servers:
+        server = RequestServer(
+            request_id=access_request.id,
+            ip_address=server_input.ip_address,
+        )
+        db.add(server)
+
+    await db.flush()
+    await db.refresh(access_request, ["servers"])
+    return _format_request_response(access_request, current_user)
+
+
+@router.post("/{request_id}/submit")
+async def submit_draft(
+    request_id: str,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Submit a previously saved draft request for approval."""
+    result = await db.execute(
+        select(AccessRequest)
+        .options(selectinload(AccessRequest.servers))
+        .where(AccessRequest.request_id == request_id)
+    )
+    access_request = result.scalar_one_or_none()
+
+    if not access_request:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    if access_request.status != RequestStatus.DRAFT:
+        raise HTTPException(status_code=400, detail="Only draft requests can be submitted")
+
+    if access_request.requester_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not your request")
+
+    # Change status and create workflow
+    access_request.status = RequestStatus.PENDING_APPROVAL
+    approval_engine = ApprovalEngine(db)
+    await approval_engine.create_approval_workflow(access_request)
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        action="draft_submitted",
+        resource_type="access_request",
+        resource_id=request_id,
+    )
+    db.add(audit)
+
+    from ...services.notification.email_service import email_service
+    background_tasks.add_task(
+        email_service.notify_request_submitted,
+        {
+            "request_id": access_request.request_id,
+            "requester_email": current_user.email,
+            "access_type": access_request.access_type.value,
+            "servers": ", ".join(s.ip_address or s.hostname or "" for s in access_request.servers),
+        },
+    )
+
+    return {"message": "Draft submitted for approval", "request_id": request_id}
+
+
+@router.post("/upload-csv")
+async def upload_server_csv(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Upload a CSV file of server IP addresses for bulk input.
+    CSV can have a header row with 'ip' or 'ip_address' column,
+    or just plain IPs one per line.
+    Returns validated list of IPs.
+    """
+    import csv as csv_module
+    import io
+    import re
+
+    content = await file.read()
+    text = content.decode("utf-8", errors="replace")
+
+    IP_PATTERN = re.compile(
+        r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
+    )
+
+    valid_ips = []
+    invalid_lines = []
+    duplicates = []
+    seen = set()
+
+    lines = text.strip().splitlines()
+
+    # Check if first line is a header
+    first_line = lines[0].strip().lower() if lines else ""
+    start_idx = 0
+    if first_line in ("ip", "ip_address", "ipaddress", "server", "server_ip"):
+        start_idx = 1
+    elif "," in first_line:
+        # CSV with header
+        reader = csv_module.DictReader(io.StringIO(text))
+        for row in reader:
+            normalized = {k.strip().lower(): v.strip() for k, v in row.items()}
+            ip = (
+                normalized.get("ip")
+                or normalized.get("ip_address")
+                or normalized.get("ipaddress")
+                or normalized.get("server_ip")
+                or normalized.get("server")
+                or ""
+            )
+            if ip and IP_PATTERN.match(ip):
+                if ip in seen:
+                    duplicates.append(ip)
+                else:
+                    valid_ips.append(ip)
+                    seen.add(ip)
+            elif ip:
+                invalid_lines.append(ip)
+        return {
+            "valid_ips": valid_ips,
+            "invalid": invalid_lines,
+            "duplicates": duplicates,
+            "total_valid": len(valid_ips),
+        }
+
+    # Plain text - one IP per line
+    for line in lines[start_idx:]:
+        ip = line.strip().split(",")[0].strip()  # handle trailing commas
+        if not ip:
+            continue
+        if IP_PATTERN.match(ip):
+            if ip in seen:
+                duplicates.append(ip)
+            else:
+                valid_ips.append(ip)
+                seen.add(ip)
+        else:
+            invalid_lines.append(ip)
+
+    return {
+        "valid_ips": valid_ips,
+        "invalid": invalid_lines,
+        "duplicates": duplicates,
+        "total_valid": len(valid_ips),
+    }
 
 
 def _format_request_response(request: AccessRequest, user: User) -> AccessRequestResponse:

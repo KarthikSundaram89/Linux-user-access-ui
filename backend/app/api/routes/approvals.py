@@ -130,3 +130,59 @@ async def get_approval_history(
         "request_id": request_id,
         "steps": [ApprovalStepResponse.model_validate(s) for s in steps],
     }
+
+
+
+@router.get("/comments/{request_id}")
+async def get_approval_comments(
+    request_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Get all approval comments for a request.
+    Visible to the requester so they can see feedback from approvers.
+    """
+    from ...models.approval import ApprovalAction
+
+    req_result = await db.execute(
+        select(AccessRequest).where(AccessRequest.request_id == request_id)
+    )
+    request = req_result.scalar_one_or_none()
+    if not request:
+        raise HTTPException(status_code=404, detail="Request not found")
+
+    # Get all steps
+    steps_result = await db.execute(
+        select(ApprovalStep)
+        .options(selectinload(ApprovalStep.actions))
+        .where(ApprovalStep.request_id == request.id)
+        .order_by(ApprovalStep.step_order)
+    )
+    steps = steps_result.scalars().all()
+
+    comments = []
+    for step in steps:
+        for action in (step.actions or []):
+            if action.comments:
+                # Get approver name
+                approver_result = await db.execute(
+                    select(User).where(User.id == action.approver_id)
+                )
+                approver = approver_result.scalar_one_or_none()
+
+                comments.append({
+                    "step_name": step.step_name,
+                    "step_order": step.step_order,
+                    "approver_name": approver.display_name if approver else "Unknown",
+                    "approver_email": approver.email if approver else "",
+                    "action": action.action.value if hasattr(action.action, 'value') else str(action.action),
+                    "comments": action.comments,
+                    "created_at": action.created_at.isoformat() if action.created_at else None,
+                })
+
+    return {
+        "request_id": request_id,
+        "comments": comments,
+        "total": len(comments),
+    }

@@ -7,7 +7,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
-from sqlalchemy import select, func
+from sqlalchemy import select, func, Integer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...core.database import get_db
@@ -364,3 +364,250 @@ async def get_workflow_config(
         }
         for c in configs
     ]
+
+
+
+# --- Email Template Editor (#11) ---
+
+@router.get("/email-templates")
+async def list_email_templates(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+):
+    """List all email templates."""
+    result = await db.execute(select(EmailTemplate).order_by(EmailTemplate.template_type))
+    templates = result.scalars().all()
+    return [
+        {
+            "id": t.id,
+            "name": t.name,
+            "template_type": t.template_type,
+            "subject": t.subject,
+            "body_html": t.body_html,
+            "is_active": t.is_active,
+            "variables": t.variables,
+            "updated_at": t.updated_at,
+        }
+        for t in templates
+    ]
+
+
+@router.post("/email-templates")
+async def create_email_template(
+    name: str,
+    template_type: str,
+    subject: str,
+    body_html: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+):
+    """Create a new email template."""
+    template = EmailTemplate(
+        name=name,
+        template_type=template_type,
+        subject=subject,
+        body_html=body_html,
+        is_active=True,
+    )
+    db.add(template)
+    await db.flush()
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        action="email_template_created",
+        resource_type="email_template",
+        resource_id=str(template.id),
+    )
+    db.add(audit)
+    return {"message": f"Template '{name}' created", "id": template.id}
+
+
+@router.put("/email-templates/{template_id}")
+async def update_email_template(
+    template_id: int,
+    name: Optional[str] = None,
+    subject: Optional[str] = None,
+    body_html: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+):
+    """Update an existing email template."""
+    result = await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))
+    template = result.scalar_one_or_none()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    if name is not None:
+        template.name = name
+    if subject is not None:
+        template.subject = subject
+    if body_html is not None:
+        template.body_html = body_html
+    if is_active is not None:
+        template.is_active = is_active
+
+    audit = AuditLog(
+        user_id=current_user.id,
+        user_email=current_user.email,
+        action="email_template_updated",
+        resource_type="email_template",
+        resource_id=str(template_id),
+    )
+    db.add(audit)
+    return {"message": f"Template '{template.name}' updated"}
+
+
+@router.delete("/email-templates/{template_id}")
+async def delete_email_template(
+    template_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+):
+    """Delete an email template."""
+    result = await db.execute(select(EmailTemplate).where(EmailTemplate.id == template_id))
+    template = result.scalar_one_or_none()
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    await db.delete(template)
+    return {"message": f"Template deleted"}
+
+
+# --- Dashboard Chart Data (#9) ---
+
+@router.get("/charts/monthly-requests")
+async def chart_monthly_requests(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+):
+    """Monthly request counts for chart display."""
+    result = await db.execute(
+        select(
+            func.strftime("%Y-%m", AccessRequest.created_at).label("month"),
+            func.count(AccessRequest.id).label("total"),
+            func.sum(func.cast(AccessRequest.status == RequestStatus.PROVISIONED, Integer)).label("approved"),
+            func.sum(func.cast(AccessRequest.status == RequestStatus.REJECTED, Integer)).label("rejected"),
+        )
+        .group_by("month")
+        .order_by("month")
+    )
+    rows = result.all()
+    return [{"month": r.month, "total": r.total, "approved": r.approved or 0, "rejected": r.rejected or 0} for r in rows]
+
+
+@router.get("/charts/top-servers")
+async def chart_top_servers(
+    limit: int = Query(10, ge=1, le=50),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+):
+    """Top requested server IPs."""
+    from ...models.request import RequestServer
+    result = await db.execute(
+        select(
+            RequestServer.ip_address,
+            func.count(RequestServer.id).label("request_count"),
+        )
+        .where(RequestServer.ip_address.isnot(None))
+        .group_by(RequestServer.ip_address)
+        .order_by(func.count(RequestServer.id).desc())
+        .limit(limit)
+    )
+    rows = result.all()
+    return [{"ip_address": r.ip_address, "request_count": r.request_count} for r in rows]
+
+
+@router.get("/charts/approval-sla")
+async def chart_approval_sla(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+):
+    """Average approval time per step."""
+    from ...models.approval import ApprovalStep, ApprovalStatus
+    result = await db.execute(
+        select(ApprovalStep)
+        .where(ApprovalStep.status == ApprovalStatus.APPROVED, ApprovalStep.completed_at.isnot(None))
+    )
+    steps = result.scalars().all()
+
+    step_times = {}
+    for step in steps:
+        name = step.step_name
+        if step.completed_at and step.created_at:
+            hours = (step.completed_at - step.created_at).total_seconds() / 3600
+            if name not in step_times:
+                step_times[name] = []
+            step_times[name].append(hours)
+
+    return [
+        {
+            "step_name": name,
+            "avg_hours": round(sum(times) / len(times), 1) if times else 0,
+            "count": len(times),
+        }
+        for name, times in step_times.items()
+    ]
+
+
+# --- Password/SSH Key Rotation Reminders (#10) ---
+
+@router.get("/rotation-status")
+async def get_rotation_status(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_admin_user),
+):
+    """
+    Check rotation status of sensitive credentials.
+    Returns warnings for SSH keys and emergency admin password that
+    haven't been updated within the configured rotation period.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    ROTATION_DAYS = 90  # Recommended rotation period
+    now = datetime.now(timezone.utc)
+    threshold = now - timedelta(days=ROTATION_DAYS)
+
+    warnings = []
+
+    # Check SSH keys
+    result = await db.execute(select(SSHKey).where(SSHKey.is_active == True))
+    ssh_keys = result.scalars().all()
+    for key in ssh_keys:
+        age_days = (now - key.created_at).days if key.created_at else 999
+        updated_days = (now - key.updated_at).days if key.updated_at else age_days
+        if key.created_at and key.created_at < threshold:
+            warnings.append({
+                "type": "ssh_key",
+                "name": key.name,
+                "last_updated": key.updated_at.isoformat() if key.updated_at else key.created_at.isoformat(),
+                "age_days": age_days,
+                "status": "overdue" if age_days > ROTATION_DAYS * 2 else "due",
+                "message": f"SSH key '{key.name}' is {age_days} days old. Recommended rotation: every {ROTATION_DAYS} days.",
+            })
+
+    # Check emergency admin (we can only check if it was ever changed via audit log)
+    admin_audit = await db.execute(
+        select(AuditLog)
+        .where(AuditLog.action == "config_updated", AuditLog.resource_id == "EMERGENCY_ADMIN_PASSWORD")
+        .order_by(AuditLog.created_at.desc())
+    )
+    last_password_change = admin_audit.scalar_one_or_none()
+    if not last_password_change or (last_password_change.created_at and last_password_change.created_at < threshold):
+        last_changed = last_password_change.created_at.isoformat() if last_password_change else "Never"
+        warnings.append({
+            "type": "emergency_password",
+            "name": "Emergency Admin Password",
+            "last_updated": last_changed,
+            "age_days": (now - last_password_change.created_at).days if last_password_change and last_password_change.created_at else 999,
+            "status": "overdue",
+            "message": f"Emergency admin password last changed: {last_changed}. Recommend rotation every {ROTATION_DAYS} days.",
+        })
+
+    return {
+        "rotation_period_days": ROTATION_DAYS,
+        "warnings": warnings,
+        "total_warnings": len(warnings),
+        "status": "healthy" if not warnings else "action_required",
+    }
