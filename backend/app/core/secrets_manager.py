@@ -51,6 +51,15 @@ from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
 
+# ============================================================
+# In-Memory Cache for Secrets Manager values
+# Avoids repeated API calls — secrets are cached for 1 hour.
+# Only refreshed on: app restart, cache expiry, or explicit invalidation.
+# ============================================================
+_SM_CACHE_TTL_SECONDS = 3600  # 1 hour
+_sm_cache: Dict[str, any] = {}  # key → value
+_sm_cache_times: Dict[str, any] = {}  # key → datetime of last fetch
+
 # Sensitive keys that should be stored in Secrets Manager
 SENSITIVE_KEYS = [
     "SECRET_KEY",
@@ -220,6 +229,8 @@ def get_ssh_key_secret_name() -> str:
 def get_ssh_key_from_secrets_manager(key_name: str = "default") -> Optional[Dict[str, str]]:
     """
     Retrieve an SSH private key from AWS Secrets Manager.
+    Uses an in-memory cache (TTL: 1 hour) to avoid repeated API calls.
+    SM is only called once per hour (or on first access), not per provisioning request.
     
     Args:
         key_name: Name of the key within the secret (e.g., "default", "production-key")
@@ -229,6 +240,16 @@ def get_ssh_key_from_secrets_manager(key_name: str = "default") -> Optional[Dict
     """
     if not is_secrets_manager_enabled():
         return None
+
+    # Check cache first
+    cache_key = f"ssh_key:{key_name}"
+    cached = _sm_cache.get(cache_key)
+    if cached is not None:
+        from datetime import datetime
+        cache_time = _sm_cache_times.get(cache_key)
+        if cache_time and (datetime.now() - cache_time).total_seconds() < _SM_CACHE_TTL_SECONDS:
+            logger.debug(f"SSH key '{key_name}' served from cache")
+            return cached
 
     secret_name = get_ssh_key_secret_name()
     region = os.environ.get("AWS_SECRETS_MANAGER_REGION", "us-east-1")
@@ -254,11 +275,17 @@ def get_ssh_key_from_secrets_manager(key_name: str = "default") -> Optional[Dict
 
         if key_name in secret_data:
             key_data = secret_data[key_name]
-            return {
+            result = {
                 "private_key": key_data.get("private_key", ""),
                 "passphrase": key_data.get("passphrase", ""),
                 "key_type": key_data.get("key_type", "rsa"),
             }
+            # Store in cache
+            from datetime import datetime
+            _sm_cache[cache_key] = result
+            _sm_cache_times[cache_key] = datetime.now()
+            logger.info(f"SSH key '{key_name}' fetched from Secrets Manager and cached")
+            return result
         else:
             logger.warning(f"SSH key '{key_name}' not found in secret '{secret_name}'")
             return None
@@ -332,6 +359,7 @@ def store_ssh_key_in_secrets_manager(
     """
     Store an SSH private key in AWS Secrets Manager.
     Updates the existing SSH keys secret with the new key.
+    Invalidates the local cache so next fetch gets the new key.
     
     Args:
         key_name: Identifier for this key (e.g., "default", "production")
@@ -402,12 +430,33 @@ def store_ssh_key_in_secrets_manager(
             else:
                 raise
 
+        # Invalidate cache so next fetch gets the new key
+        invalidate_ssh_key_cache(key_name)
+
         logger.info(f"SSH key '{key_name}' stored in Secrets Manager ({secret_name})")
         return True
 
     except Exception as e:
         logger.error(f"Failed to store SSH key in Secrets Manager: {str(e)}")
         return False
+
+
+def invalidate_ssh_key_cache(key_name: str = None):
+    """
+    Invalidate the SSH key cache. Called after upload/delete.
+    If key_name is None, invalidates all SSH key caches.
+    """
+    if key_name:
+        cache_key = f"ssh_key:{key_name}"
+        _sm_cache.pop(cache_key, None)
+        _sm_cache_times.pop(cache_key, None)
+    else:
+        # Invalidate all SSH key entries
+        keys_to_remove = [k for k in _sm_cache if k.startswith("ssh_key:")]
+        for k in keys_to_remove:
+            _sm_cache.pop(k, None)
+            _sm_cache_times.pop(k, None)
+    logger.debug(f"SSH key cache invalidated: {key_name or 'all'}")
 
 
 def delete_ssh_key_from_secrets_manager(key_name: str) -> bool:
