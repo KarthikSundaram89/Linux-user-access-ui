@@ -1,12 +1,21 @@
 """
 Application Configuration Module.
-All configurable values are managed through environment variables or the admin UI.
+All configurable values are managed through environment variables, 
+AWS Secrets Manager, or the admin UI.
+
+Sensitive values (SECRET_KEY, ENCRYPTION_KEY, SMTP_PASSWORD, etc.) are loaded
+from AWS Secrets Manager when AWS_SECRETS_MANAGER_ENABLED=true.
+Non-sensitive values can remain in .env or environment variables.
 """
 
 from pathlib import Path
 from typing import Optional
 from pydantic_settings import BaseSettings
 from pydantic import Field
+
+# Load secrets from AWS Secrets Manager BEFORE Settings is instantiated
+from .secrets_manager import load_secrets_into_environment
+load_secrets_into_environment()
 
 
 class Settings(BaseSettings):
@@ -44,6 +53,12 @@ class Settings(BaseSettings):
     # AWS Configuration (for live EC2 status checks)
     AWS_DEFAULT_REGION: str = "us-east-1"
     AWS_PROFILE_MAPPING: str = ""  # JSON: {"account_name": "aws_profile_name"}
+
+    # AWS Secrets Manager (stores all sensitive values)
+    AWS_SECRETS_MANAGER_ENABLED: str = "false"
+    AWS_SECRETS_MANAGER_SECRET_NAME: str = "linux-access-portal/config"
+    AWS_SECRETS_MANAGER_REGION: str = "us-east-1"
+    AWS_SECRETS_MANAGER_PROFILE: str = ""
 
     # SMTP Email
     SMTP_HOST: str = ""

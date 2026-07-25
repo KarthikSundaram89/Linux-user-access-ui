@@ -40,20 +40,28 @@ _INSECURE_DEFAULTS = {
 
 
 def _validate_secrets():
-    """Validate that all required secrets are configured and not insecure defaults."""
+    """
+    Validate that all required secrets are configured and not insecure defaults.
+    When AWS Secrets Manager is enabled, secrets are already loaded into env vars.
+    """
+    from .core.secrets_manager import is_secrets_manager_enabled
+
     errors = []
+
     if not settings.SECRET_KEY or settings.SECRET_KEY in _INSECURE_DEFAULTS:
-        errors.append("SECRET_KEY must be set to a secure value (not empty or default)")
+        errors.append("SECRET_KEY must be set to a secure value")
     if not settings.SESSION_SECRET_KEY or settings.SESSION_SECRET_KEY in _INSECURE_DEFAULTS:
-        errors.append("SESSION_SECRET_KEY must be set to a secure value (not empty or default)")
+        errors.append("SESSION_SECRET_KEY must be set to a secure value")
     if not settings.EMERGENCY_ADMIN_PASSWORD or settings.EMERGENCY_ADMIN_PASSWORD in _INSECURE_DEFAULTS:
-        errors.append("EMERGENCY_ADMIN_PASSWORD must be set to a secure value (not empty or default)")
+        errors.append("EMERGENCY_ADMIN_PASSWORD must be set to a secure value")
+
     if errors:
+        source = "AWS Secrets Manager" if is_secrets_manager_enabled() else ".env file or environment variables"
         for err in errors:
             logger.error(f"STARTUP VALIDATION FAILED: {err}")
         raise RuntimeError(
-            "Application startup aborted due to insecure configuration. "
-            "Please set the following environment variables: " + "; ".join(errors)
+            f"Application startup aborted due to insecure configuration. "
+            f"Please configure these in {source}: " + "; ".join(errors)
         )
 
 

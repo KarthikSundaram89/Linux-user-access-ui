@@ -611,3 +611,55 @@ async def get_rotation_status(
         "total_warnings": len(warnings),
         "status": "healthy" if not warnings else "action_required",
     }
+
+
+# --- Secrets Manager Status ---
+
+@router.get("/secrets-status")
+async def get_secrets_status(
+    current_user: User = Depends(get_current_admin_user),
+):
+    """
+    Check AWS Secrets Manager integration status.
+    Shows which secrets source is active and health status.
+    Does NOT expose secret values.
+    """
+    from ...core.secrets_manager import is_secrets_manager_enabled, SENSITIVE_KEYS
+    from ...core.config import settings
+    import os
+
+    sm_enabled = is_secrets_manager_enabled()
+
+    # Check which sensitive keys are configured (without exposing values)
+    key_status = {}
+    for key in SENSITIVE_KEYS:
+        value = getattr(settings, key, None) or os.environ.get(key, "")
+        if value:
+            key_status[key] = {
+                "configured": True,
+                "source": "secrets_manager" if sm_enabled else "environment",
+                "length": len(value),
+            }
+        else:
+            key_status[key] = {
+                "configured": False,
+                "source": None,
+                "length": 0,
+            }
+
+    all_configured = all(v["configured"] for v in key_status.values())
+
+    return {
+        "secrets_manager_enabled": sm_enabled,
+        "secret_name": settings.AWS_SECRETS_MANAGER_SECRET_NAME if sm_enabled else None,
+        "region": settings.AWS_SECRETS_MANAGER_REGION if sm_enabled else None,
+        "all_secrets_configured": all_configured,
+        "keys": key_status,
+        "recommendation": (
+            "All secrets are loaded from AWS Secrets Manager"
+            if sm_enabled and all_configured
+            else "Enable AWS Secrets Manager for production (set AWS_SECRETS_MANAGER_ENABLED=true)"
+            if not sm_enabled
+            else "Some secrets are missing - check AWS Secrets Manager configuration"
+        ),
+    }
