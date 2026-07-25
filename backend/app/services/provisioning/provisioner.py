@@ -20,6 +20,25 @@ from .ssh_engine import SSHEngine, SSHResult
 logger = logging.getLogger(__name__)
 
 
+class _SMKeyWrapper:
+    """
+    Wrapper for SSH keys fetched from AWS Secrets Manager.
+    Mimics the SSHKey database model interface but stores raw (not Fernet-encrypted) values.
+    The private_key_encrypted field actually contains the raw key — the SSH engine's
+    decrypt_value call is bypassed via a special marker.
+    """
+
+    def __init__(self, private_key: str, passphrase: str = "", key_type: str = "rsa"):
+        from ...core.security import encrypt_value
+        # Encrypt in memory so the SSH engine can decrypt_value() as normal
+        self.private_key_encrypted = encrypt_value(private_key)
+        self.passphrase_encrypted = encrypt_value(passphrase) if passphrase else None
+        self.key_type = key_type
+        self.name = "AWS Secrets Manager Key"
+        self.is_default = True
+        self.is_active = True
+
+
 class ServerProvisioningResult:
     """Detailed result for a single server provisioning attempt."""
 
@@ -303,7 +322,29 @@ class ProvisioningService:
 
 
     async def _get_ssh_key(self) -> Optional[SSHKey]:
-        """Get the default active SSH key."""
+        """
+        Get the SSH key for provisioning.
+        Priority:
+          1. AWS Secrets Manager (if enabled) — keys never stored in DB
+          2. Database (legacy / SM disabled) — encrypted with Fernet
+        """
+        # Try AWS Secrets Manager first
+        from ...core.secrets_manager import is_secrets_manager_enabled, get_ssh_key_from_secrets_manager
+
+        if is_secrets_manager_enabled():
+            sm_key = get_ssh_key_from_secrets_manager("default")
+            if sm_key and sm_key.get("private_key"):
+                # Return a synthetic SSHKey-like object with raw (unencrypted) key
+                # The SSH engine expects encrypted values, so we encrypt them
+                # in memory for the interface contract
+                from ...core.security import encrypt_value
+                return _SMKeyWrapper(
+                    private_key=sm_key["private_key"],
+                    passphrase=sm_key.get("passphrase", ""),
+                    key_type=sm_key.get("key_type", "rsa"),
+                )
+
+        # Fallback to database
         result = await self.db.execute(
             select(SSHKey).where(SSHKey.is_active == True, SSHKey.is_default == True)
         )

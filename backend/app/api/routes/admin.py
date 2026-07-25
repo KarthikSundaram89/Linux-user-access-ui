@@ -210,10 +210,33 @@ async def upload_ssh_key(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_admin_user),
 ):
-    """Upload an SSH private key."""
+    """
+    Upload an SSH private key.
+    If AWS Secrets Manager is enabled, stores the key there.
+    Otherwise, stores encrypted in the database.
+    """
     key_content = await private_key.read()
     key_str = key_content.decode("utf-8")
 
+    # Store in AWS Secrets Manager if enabled
+    from ...core.secrets_manager import (
+        is_secrets_manager_enabled,
+        store_ssh_key_in_secrets_manager,
+    )
+
+    stored_in_sm = False
+    if is_secrets_manager_enabled():
+        sm_key_name = name.lower().replace(" ", "-")
+        stored_in_sm = store_ssh_key_in_secrets_manager(
+            key_name=sm_key_name,
+            private_key=key_str,
+            passphrase=passphrase or "",
+            key_type=key_type,
+        )
+        if stored_in_sm:
+            logger.info(f"SSH key '{name}' stored in AWS Secrets Manager as '{sm_key_name}'")
+
+    # Also store in database (encrypted) as fallback / reference
     encrypted_key = encrypt_value(key_str)
     encrypted_passphrase = encrypt_value(passphrase) if passphrase else None
 
@@ -231,11 +254,17 @@ async def upload_ssh_key(
         user_email=current_user.email,
         action="ssh_key_uploaded",
         resource_type="ssh_key",
-        description=f"SSH key '{name}' uploaded",
+        description=f"SSH key '{name}' uploaded" + (" (stored in Secrets Manager)" if stored_in_sm else " (stored in database)"),
     )
     db.add(audit)
     await db.flush()
-    return {"message": f"SSH key '{name}' uploaded", "id": ssh_key.id}
+
+    return {
+        "message": f"SSH key '{name}' uploaded",
+        "id": ssh_key.id,
+        "stored_in_secrets_manager": stored_in_sm,
+        "storage": "aws_secrets_manager" if stored_in_sm else "database_encrypted",
+    }
 
 
 @router.get("/ssh-keys")

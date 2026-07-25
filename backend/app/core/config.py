@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     # AWS Secrets Manager (stores all sensitive values)
     AWS_SECRETS_MANAGER_ENABLED: str = "false"
     AWS_SECRETS_MANAGER_SECRET_NAME: str = "linux-access-portal/config"
+    AWS_SECRETS_MANAGER_SSH_KEY_SECRET: str = "linux-access-portal/ssh-keys"
     AWS_SECRETS_MANAGER_REGION: str = "us-east-1"
     AWS_SECRETS_MANAGER_PROFILE: str = ""
 
