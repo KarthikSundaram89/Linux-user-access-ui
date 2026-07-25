@@ -5,6 +5,7 @@ Main FastAPI Application Entry Point.
 
 import logging
 import os
+import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,6 +15,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.util import get_remote_address
 from slowapi.errors import RateLimitExceeded
@@ -29,11 +31,39 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Insecure defaults that must not be used
+_INSECURE_DEFAULTS = {
+    "change-this-in-production-use-openssl-rand-hex-32",
+    "session-secret-change-in-production",
+    "change-this-immediately",
+}
+
+
+def _validate_secrets():
+    """Validate that all required secrets are configured and not insecure defaults."""
+    errors = []
+    if not settings.SECRET_KEY or settings.SECRET_KEY in _INSECURE_DEFAULTS:
+        errors.append("SECRET_KEY must be set to a secure value (not empty or default)")
+    if not settings.SESSION_SECRET_KEY or settings.SESSION_SECRET_KEY in _INSECURE_DEFAULTS:
+        errors.append("SESSION_SECRET_KEY must be set to a secure value (not empty or default)")
+    if not settings.EMERGENCY_ADMIN_PASSWORD or settings.EMERGENCY_ADMIN_PASSWORD in _INSECURE_DEFAULTS:
+        errors.append("EMERGENCY_ADMIN_PASSWORD must be set to a secure value (not empty or default)")
+    if errors:
+        for err in errors:
+            logger.error(f"STARTUP VALIDATION FAILED: {err}")
+        raise RuntimeError(
+            "Application startup aborted due to insecure configuration. "
+            "Please set the following environment variables: " + "; ".join(errors)
+        )
+
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifecycle management."""
+    # Validate secrets before anything else
+    _validate_secrets()
+
     logger.info(f"Starting {settings.APP_NAME} v{settings.APP_VERSION}")
 
     # Create required directories
@@ -109,6 +139,89 @@ app.add_middleware(
 )
 
 
+# Security Headers Middleware
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add security headers to all responses."""
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;"
+        )
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
+
+
+# CSRF Protection Middleware
+_CSRF_EXEMPT_PATHS = {"/api/auth/callback", "/api/auth/login"}
+_CSRF_MUTATING_METHODS = {"POST", "PUT", "DELETE", "PATCH"}
+
+
+class CSRFMiddleware(BaseHTTPMiddleware):
+    """CSRF protection using double-submit cookie pattern."""
+
+    async def dispatch(self, request: Request, call_next):
+        # For mutating requests, validate CSRF token (unless exempt)
+        if request.method in _CSRF_MUTATING_METHODS:
+            path = request.url.path
+            if path not in _CSRF_EXEMPT_PATHS:
+                cookie_token = request.cookies.get("csrf_token")
+                header_token = request.headers.get("X-CSRF-Token")
+                if not cookie_token or not header_token or cookie_token != header_token:
+                    return JSONResponse(
+                        status_code=403,
+                        content={"detail": "CSRF token missing or invalid"},
+                    )
+
+        response = await call_next(request)
+
+        # Set CSRF cookie on all GET responses (non-HttpOnly so JS can read it)
+        if request.method == "GET":
+            if not request.cookies.get("csrf_token"):
+                csrf_token = secrets.token_urlsafe(32)
+                response.set_cookie(
+                    key="csrf_token",
+                    value=csrf_token,
+                    httponly=False,
+                    secure=True,
+                    samesite="lax",
+                    path="/",
+                )
+
+        return response
+
+
+app.add_middleware(CSRFMiddleware)
+
+
+# Request Body Size Limit Middleware
+_MAX_BODY_SIZE = 10 * 1024 * 1024  # 10MB
+
+
+class RequestBodySizeLimitMiddleware(BaseHTTPMiddleware):
+    """Reject requests with bodies exceeding the configured maximum size."""
+
+    async def dispatch(self, request: Request, call_next):
+        content_length = request.headers.get("content-length")
+        if content_length and int(content_length) > _MAX_BODY_SIZE:
+            return JSONResponse(
+                status_code=413,
+                content={"detail": f"Request body too large. Maximum size is {_MAX_BODY_SIZE // (1024 * 1024)}MB"},
+            )
+        return await call_next(request)
+
+
+app.add_middleware(RequestBodySizeLimitMiddleware)
+
+
 
 # Include API routes
 from .api.routes import auth, requests, approvals, admin, reports, servers
@@ -148,13 +261,15 @@ async def search(
     async with AsyncSessionLocal() as db:
         results = {"users": [], "requests": [], "servers": []}
 
+        search_pattern = "%" + q + "%"
+
         # Search users
         user_result = await db.execute(
             select(User).where(
                 or_(
-                    User.email.ilike(f"%{q}%"),
-                    User.display_name.ilike(f"%{q}%"),
-                    User.department.ilike(f"%{q}%"),
+                    User.email.ilike(search_pattern),
+                    User.display_name.ilike(search_pattern),
+                    User.department.ilike(search_pattern),
                 )
             ).limit(10)
         )
@@ -167,9 +282,9 @@ async def search(
         req_result = await db.execute(
             select(AccessRequest).where(
                 or_(
-                    AccessRequest.request_id.ilike(f"%{q}%"),
-                    AccessRequest.application_name.ilike(f"%{q}%"),
-                    AccessRequest.project_name.ilike(f"%{q}%"),
+                    AccessRequest.request_id.ilike(search_pattern),
+                    AccessRequest.application_name.ilike(search_pattern),
+                    AccessRequest.project_name.ilike(search_pattern),
                 )
             ).limit(10)
         )
@@ -182,8 +297,8 @@ async def search(
         srv_result = await db.execute(
             select(RequestServer).where(
                 or_(
-                    RequestServer.hostname.ilike(f"%{q}%"),
-                    RequestServer.ip_address.ilike(f"%{q}%"),
+                    RequestServer.hostname.ilike(search_pattern),
+                    RequestServer.ip_address.ilike(search_pattern),
                 )
             ).limit(10)
         )

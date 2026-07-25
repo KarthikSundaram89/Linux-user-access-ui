@@ -4,6 +4,8 @@ Handles Azure AD OAuth2 login and emergency admin login.
 """
 
 import logging
+import time
+from collections import defaultdict
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -24,6 +26,28 @@ from ...services.auth.azure_ad import azure_ad_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["Authentication"])
+
+# Brute-force protection for emergency login
+_failed_attempts: dict = defaultdict(list)
+_LOCKOUT_THRESHOLD = 5
+_LOCKOUT_DURATION = 900  # 15 minutes in seconds
+
+
+def _check_brute_force(ip: str) -> None:
+    """Check if IP is locked out due to too many failed attempts."""
+    now = time.time()
+    # Clean up old entries
+    _failed_attempts[ip] = [t for t in _failed_attempts[ip] if now - t < _LOCKOUT_DURATION]
+    if len(_failed_attempts[ip]) >= _LOCKOUT_THRESHOLD:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Too many failed login attempts. Please try again after 15 minutes.",
+        )
+
+
+def _record_failed_attempt(ip: str) -> None:
+    """Record a failed login attempt for an IP."""
+    _failed_attempts[ip].append(time.time())
 
 
 
@@ -171,14 +195,22 @@ async def callback(
 @router.post("/login/emergency")
 async def emergency_login(
     login_data: UserLogin,
+    request: Request,
     response: Response,
     db: AsyncSession = Depends(get_db),
 ):
     """Emergency admin login (local credentials)."""
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Check brute-force lockout
+    _check_brute_force(client_ip)
+
+    # Validate username and password using bcrypt
     if (
         login_data.username != settings.EMERGENCY_ADMIN_USERNAME
-        or login_data.password != settings.EMERGENCY_ADMIN_PASSWORD
+        or not verify_password(login_data.password, settings.emergency_admin_password_hash)
     ):
+        _record_failed_attempt(client_ip)
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     # Find or create emergency admin

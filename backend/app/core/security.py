@@ -25,7 +25,18 @@ def get_fernet() -> Fernet:
     """Get or create Fernet encryption instance."""
     global _fernet_key
     if _fernet_key is None:
-        key = hashlib.sha256(settings.SECRET_KEY.encode()).digest()
+        import logging
+        _logger = logging.getLogger(__name__)
+        encryption_source = settings.ENCRYPTION_KEY
+        if encryption_source:
+            _logger.info("Using dedicated ENCRYPTION_KEY for data encryption")
+        else:
+            _logger.warning(
+                "ENCRYPTION_KEY not set; falling back to SECRET_KEY for encryption. "
+                "Set ENCRYPTION_KEY to allow independent key rotation."
+            )
+            encryption_source = settings.SECRET_KEY
+        key = hashlib.sha256(encryption_source.encode()).digest()
         import base64
         _fernet_key = Fernet(base64.urlsafe_b64encode(key[:32]))
     return _fernet_key
@@ -57,14 +68,24 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     """Create a JWT access token."""
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=settings.SESSION_TIMEOUT_MINUTES))
-    to_encode.update({"exp": expire})
+    to_encode.update({
+        "exp": expire,
+        "iss": "linux-access-portal",
+        "aud": "linux-access-portal-api",
+    })
     return jwt.encode(to_encode, settings.SECRET_KEY, algorithm="HS256")
 
 
 def decode_access_token(token: str) -> Optional[dict]:
     """Decode and validate a JWT access token."""
     try:
-        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=["HS256"])
+        payload = jwt.decode(
+            token,
+            settings.SECRET_KEY,
+            algorithms=["HS256"],
+            audience="linux-access-portal-api",
+            issuer="linux-access-portal",
+        )
         return payload
     except JWTError:
         return None

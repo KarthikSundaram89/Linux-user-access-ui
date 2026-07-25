@@ -412,7 +412,15 @@ async def upload_server_csv(
     import io
     import re
 
+    # Enforce 1MB file size limit
+    max_size = 1 * 1024 * 1024  # 1MB
     content = await file.read()
+    if len(content) > max_size:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large. Maximum size is 1MB, got {len(content)} bytes.",
+        )
+
     text = content.decode("utf-8", errors="replace")
 
     IP_PATTERN = re.compile(

@@ -98,7 +98,20 @@ class SSHEngine:
     ) -> SSHResult:
         """Synchronous SSH execution (run in thread pool)."""
         client = paramiko.SSHClient()
-        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+
+        # Configure host key policy based on settings
+        if settings.SSH_KNOWN_HOSTS_FILE:
+            client.set_missing_host_key_policy(paramiko.RejectPolicy())
+            try:
+                client.load_host_keys(settings.SSH_KNOWN_HOSTS_FILE)
+            except Exception as e:
+                return SSHResult(
+                    success=False, stdout="", stderr="", exit_code=-1,
+                    hostname=hostname,
+                    error_message=f"Failed to load known_hosts file: {str(e)}",
+                )
+        else:
+            client.set_missing_host_key_policy(paramiko.WarningPolicy())
 
         try:
             # Decrypt private key

@@ -3,6 +3,7 @@ Email Notification Service.
 Handles sending all email notifications with configurable templates.
 """
 
+import html
 import logging
 from typing import Optional, Dict, Any, List
 from email.mime.text import MIMEText
@@ -14,6 +15,11 @@ from jinja2 import Template
 from ...core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _esc(value: Any) -> str:
+    """HTML-escape a value for safe insertion into email templates."""
+    return html.escape(str(value)) if value is not None else ""
 
 
 
@@ -79,14 +85,18 @@ class EmailService:
 
     async def notify_request_submitted(self, request_data: Dict[str, Any]):
         """Notify user that request was submitted."""
-        subject = f"Access Request {request_data['request_id']} Submitted"
+        request_id = _esc(request_data['request_id'])
+        access_type = _esc(request_data['access_type'])
+        servers = _esc(request_data.get('servers', 'N/A'))
+
+        subject = f"Access Request {request_id} Submitted"
         body = f"""
         <h2>Access Request Submitted</h2>
         <p>Your access request has been submitted successfully.</p>
         <table>
-            <tr><td><b>Request ID:</b></td><td>{request_data['request_id']}</td></tr>
-            <tr><td><b>Type:</b></td><td>{request_data['access_type']}</td></tr>
-            <tr><td><b>Servers:</b></td><td>{request_data.get('servers', 'N/A')}</td></tr>
+            <tr><td><b>Request ID:</b></td><td>{request_id}</td></tr>
+            <tr><td><b>Type:</b></td><td>{access_type}</td></tr>
+            <tr><td><b>Servers:</b></td><td>{servers}</td></tr>
             <tr><td><b>Status:</b></td><td>Pending Approval</td></tr>
         </table>
         <p>You will be notified of any updates.</p>
@@ -95,16 +105,22 @@ class EmailService:
 
     async def notify_approval_pending(self, approval_data: Dict[str, Any]):
         """Notify approver of pending approval."""
-        subject = f"Approval Required: {approval_data['request_id']}"
+        request_id = _esc(approval_data['request_id'])
+        requester_name = _esc(approval_data['requester_name'])
+        access_type = _esc(approval_data['access_type'])
+        servers = _esc(approval_data.get('servers', 'N/A'))
+        justification = _esc(approval_data.get('justification', ''))
+
+        subject = f"Approval Required: {request_id}"
         body = f"""
         <h2>Approval Required</h2>
         <p>A new access request requires your approval.</p>
         <table>
-            <tr><td><b>Request ID:</b></td><td>{approval_data['request_id']}</td></tr>
-            <tr><td><b>Requester:</b></td><td>{approval_data['requester_name']}</td></tr>
-            <tr><td><b>Type:</b></td><td>{approval_data['access_type']}</td></tr>
-            <tr><td><b>Servers:</b></td><td>{approval_data.get('servers', 'N/A')}</td></tr>
-            <tr><td><b>Justification:</b></td><td>{approval_data.get('justification', '')}</td></tr>
+            <tr><td><b>Request ID:</b></td><td>{request_id}</td></tr>
+            <tr><td><b>Requester:</b></td><td>{requester_name}</td></tr>
+            <tr><td><b>Type:</b></td><td>{access_type}</td></tr>
+            <tr><td><b>Servers:</b></td><td>{servers}</td></tr>
+            <tr><td><b>Justification:</b></td><td>{justification}</td></tr>
         </table>
         <p>Please log in to the portal to approve or reject this request.</p>
         """
@@ -112,13 +128,16 @@ class EmailService:
 
     async def notify_request_approved(self, request_data: Dict[str, Any]):
         """Notify user that request was approved."""
-        subject = f"Access Request {request_data['request_id']} Approved"
+        request_id = _esc(request_data['request_id'])
+        access_type = _esc(request_data['access_type'])
+
+        subject = f"Access Request {request_id} Approved"
         body = f"""
         <h2>Request Approved</h2>
         <p>Your access request has been fully approved and provisioning will begin shortly.</p>
         <table>
-            <tr><td><b>Request ID:</b></td><td>{request_data['request_id']}</td></tr>
-            <tr><td><b>Type:</b></td><td>{request_data['access_type']}</td></tr>
+            <tr><td><b>Request ID:</b></td><td>{request_id}</td></tr>
+            <tr><td><b>Type:</b></td><td>{access_type}</td></tr>
         </table>
         """
         await self.send_email([request_data['requester_email']], subject, body)
@@ -131,6 +150,8 @@ class EmailService:
         total = request_data.get('total', 0)
         server_results = request_data.get('server_results', [])
 
+        request_id = _esc(request_data['request_id'])
+
         if all_success:
             status_text = "Successful"
             header_color = "#22c55e"
@@ -141,19 +162,19 @@ class EmailService:
             status_text = "Failed"
             header_color = "#ef4444"
 
-        subject = f"Provisioning {status_text}: {request_data['request_id']} ({succeeded}/{total} servers)"
+        subject = f"Provisioning {status_text}: {request_id} ({succeeded}/{total} servers)"
 
         # Build per-server results table
         server_rows = ""
         for sr in server_results:
-            server_name = sr.get('server', sr.get('hostname') or sr.get('ip_address', 'Unknown'))
+            server_name = _esc(sr.get('server', sr.get('hostname') or sr.get('ip_address', 'Unknown')))
             if sr.get('success'):
                 status_badge = '<span style="color:#22c55e;font-weight:bold;">&#10003; SUCCESS</span>'
-                detail = sr.get('message', 'Provisioned successfully')
+                detail = _esc(sr.get('message', 'Provisioned successfully'))
             else:
                 status_badge = '<span style="color:#ef4444;font-weight:bold;">&#10007; FAILED</span>'
                 error_type = sr.get('error_type', 'unknown')
-                detail = sr.get('message', sr.get('error_detail', 'Unknown error'))
+                detail = _esc(sr.get('message', sr.get('error_detail', 'Unknown error')))
                 if error_type == 'auth_failed':
                     detail = f"Authentication failed - {detail}"
                 elif error_type == 'timeout':
@@ -161,7 +182,8 @@ class EmailService:
                 elif error_type == 'connection_failed':
                     detail = f"Connection failed - {detail}"
                 elif error_type == 'script_failed':
-                    detail = f"Script error (exit {sr.get('exit_code', '?')}) - {detail}"
+                    exit_code = _esc(sr.get('exit_code', '?'))
+                    detail = f"Script error (exit {exit_code}) - {detail}"
 
             server_rows += f"""
             <tr>
@@ -174,7 +196,7 @@ class EmailService:
         <div style="font-family:Arial,sans-serif;max-width:700px;">
             <h2 style="color:{header_color};">Provisioning {status_text}</h2>
             <table style="width:100%;margin-bottom:16px;">
-                <tr><td><b>Request ID:</b></td><td>{request_data['request_id']}</td></tr>
+                <tr><td><b>Request ID:</b></td><td>{request_id}</td></tr>
                 <tr><td><b>Total Servers:</b></td><td>{total}</td></tr>
                 <tr><td><b>Succeeded:</b></td><td style="color:#22c55e;font-weight:bold;">{succeeded}</td></tr>
                 <tr><td><b>Failed:</b></td><td style="color:#ef4444;font-weight:bold;">{failed}</td></tr>
@@ -202,27 +224,33 @@ class EmailService:
 
     async def notify_sudo_expiry_reminder(self, request_data: Dict[str, Any]):
         """Notify user of upcoming sudo expiry."""
-        subject = f"Sudo Access Expiring Soon: {request_data['request_id']}"
+        request_id = _esc(request_data['request_id'])
+        expiry_date = _esc(request_data.get('expiry_date', 'N/A'))
+
+        subject = f"Sudo Access Expiring Soon: {request_id}"
         body = f"""
         <h2>Sudo Access Expiring Soon</h2>
-        <p>Your sudo access will expire on {request_data.get('expiry_date', 'N/A')}.</p>
+        <p>Your sudo access will expire on {expiry_date}.</p>
         <p>Please submit a renewal request if you still need access.</p>
         <table>
-            <tr><td><b>Request ID:</b></td><td>{request_data['request_id']}</td></tr>
-            <tr><td><b>Expiry Date:</b></td><td>{request_data.get('expiry_date', 'N/A')}</td></tr>
+            <tr><td><b>Request ID:</b></td><td>{request_id}</td></tr>
+            <tr><td><b>Expiry Date:</b></td><td>{expiry_date}</td></tr>
         </table>
         """
         await self.send_email([request_data['requester_email']], subject, body)
 
     async def notify_sudo_expired(self, request_data: Dict[str, Any]):
         """Notify user that sudo has expired and been revoked."""
-        subject = f"Sudo Access Expired: {request_data['request_id']}"
+        request_id = _esc(request_data['request_id'])
+        servers = _esc(request_data.get('servers', 'N/A'))
+
+        subject = f"Sudo Access Expired: {request_id}"
         body = f"""
         <h2>Sudo Access Expired</h2>
         <p>Your sudo access has expired and been automatically revoked.</p>
         <table>
-            <tr><td><b>Request ID:</b></td><td>{request_data['request_id']}</td></tr>
-            <tr><td><b>Servers:</b></td><td>{request_data.get('servers', 'N/A')}</td></tr>
+            <tr><td><b>Request ID:</b></td><td>{request_id}</td></tr>
+            <tr><td><b>Servers:</b></td><td>{servers}</td></tr>
         </table>
         <p>Submit a new request if you need continued access.</p>
         """

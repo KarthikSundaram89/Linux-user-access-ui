@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
     DEBUG: bool = False
-    SECRET_KEY: str = "change-this-in-production-use-openssl-rand-hex-32"
+    SECRET_KEY: str = ""
     CORS_ORIGINS: str = "http://localhost:3000,http://localhost:8000"
 
     # Database
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
 
     # Session
     SESSION_TIMEOUT_MINUTES: int = 60
-    SESSION_SECRET_KEY: str = "session-secret-change-in-production"
+    SESSION_SECRET_KEY: str = ""
 
     # Rate Limiting
     RATE_LIMIT_PER_MINUTE: int = 60
@@ -80,7 +80,20 @@ class Settings(BaseSettings):
 
     # Emergency Admin
     EMERGENCY_ADMIN_USERNAME: str = "admin"
-    EMERGENCY_ADMIN_PASSWORD: str = "change-this-immediately"
+    EMERGENCY_ADMIN_PASSWORD: str = ""
+
+    # SSH Known Hosts
+    SSH_KNOWN_HOSTS_FILE: str = ""
+
+    # Encryption Key (separate from SECRET_KEY for data-at-rest encryption)
+    ENCRYPTION_KEY: str = ""
+
+    @property
+    def emergency_admin_password_hash(self) -> str:
+        """Lazily hash the configured emergency admin password for comparison."""
+        from passlib.context import CryptContext
+        pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+        return pwd_context.hash(self.EMERGENCY_ADMIN_PASSWORD)
 
     @property
     def azure_authority_url(self) -> str:
